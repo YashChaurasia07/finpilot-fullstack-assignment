@@ -1,0 +1,145 @@
+
+=== 1. Top 10 customers by current-snapshot AUM ===
+ customer_id |    full_name    | segment  | positions |    aum     
+-------------+-----------------+----------+-----------+------------
+ C0026       | Rohan Kulkarni  | Mass     |        19 | 1953574.61
+ C0100       | Ananya Malhotra | Mass     |        28 | 1853671.75
+ C0008       | Kabir Singh     | Mass     |        17 | 1525930.15
+ C0011       | Arjun Nair      | Mass     |        18 | 1423585.15
+ C0072       | Reyansh Gupta   | Mass     |        18 | 1407305.73
+ C0037       | Vivaan Verma    | Mass     |        14 | 1206826.28
+ C0020       | Vivaan Gupta    | Mass     |        21 | 1081765.22
+ C0050       | Naina Verma     | Mass     |        12 | 1043093.20
+ C0109       | Ira Kulkarni    | Affluent |        16 |  999605.04
+ C0112       | Karan Malhotra  | Mass     |        14 |  985479.40
+(10 rows)
+
+
+=== 2a. Asset-class allocation for ONE customer (C0002) ===
+ asset_class | market_value | weight_pct 
+-------------+--------------+------------
+ EQUITY      |    201193.28 |      76.47
+ MUTUAL_FUND |     57550.81 |      21.88
+ BOND        |      4344.40 |       1.65
+(3 rows)
+
+
+=== 2b. Asset-class allocation for the WHOLE dataset ===
+ asset_class | positions | market_value | weight_pct 
+-------------+-----------+--------------+------------
+ EQUITY      |       408 |  44180166.26 |      83.75
+ ETF         |       136 |   4033879.85 |       7.65
+ MUTUAL_FUND |       201 |   1610811.84 |       3.05
+ BOND        |       133 |   1523032.00 |       2.89
+ REIT        |        51 |    868390.47 |       1.65
+ GSEC        |        53 |    538683.13 |       1.02
+(6 rows)
+
+
+=== 3. Monthly BUY/SELL net cash flow, last 12 months (SETTLED only; SELL = cash in, BUY = cash out) ===
+   month    | sell_inflow | buy_outflow | net_cash_flow 
+------------+-------------+-------------+---------------
+ 2025-11-01 |  1930629.15 |  2721171.97 |    -790542.82
+ 2025-12-01 |  1232961.29 |  2301830.40 |   -1068869.11
+ 2026-01-01 |  1759747.24 |  2328767.53 |    -569020.29
+ 2026-02-01 |  1650955.38 |  3078687.63 |   -1427732.25
+ 2026-03-01 |  1837644.73 |  2436317.78 |    -598673.05
+ 2026-04-01 |  1581154.36 |  2548377.06 |    -967222.70
+ 2026-05-01 |  1855054.19 |  3253617.04 |   -1398562.85
+ 2026-06-01 |  1694488.71 |  2426172.11 |    -731683.40
+ 2026-07-01 |  1546692.29 |  2565847.10 |   -1019154.81
+ 2026-08-01 |  1544970.43 |  2448438.93 |    -903468.50
+ 2026-09-01 |  1139774.29 |  1932513.65 |    -792739.36
+ 2026-10-01 |           0 |           0 |             0
+(12 rows)
+
+
+=== 4. Top instruments by number of distinct holders ===
+ instrument_id | symbol | asset_class | holders | total_value 
+---------------+--------+-------------+---------+-------------
+ I0049         | MU005  | MUTUAL_FUND |      26 |    60153.18
+ I0013         | EQ013  | EQUITY      |      17 |  4092941.01
+ I0006         | EQ006  | EQUITY      |      17 |  1774097.91
+ I0029         | EQ029  | EQUITY      |      17 |   343094.06
+ I0080         | GS004  | GSEC        |      17 |   165293.77
+ I0031         | EQ031  | EQUITY      |      16 |  2409449.25
+ I0012         | EQ012  | EQUITY      |      16 |  1258752.39
+ I0023         | EQ023  | EQUITY      |      16 |   842028.57
+ I0036         | ET004  | ETF         |      16 |   829928.75
+ I0040         | ET008  | ETF         |      16 |   705245.83
+(10 rows)
+
+
+=== 5. Customers with HIGH-priority goals below 25% funded ===
+ customer_id |   full_name   | goal_id |        goal_name         | target_amount | current_funded_amount | funded_pct | target_date 
+-------------+---------------+---------+--------------------------+---------------+-----------------------+------------+-------------
+ C0055       | Tara Bose     | G00083  | Personal Wealth Creation |    3785626.39 |             126009.16 |        3.3 | 2038-06-28
+ C0018       | Aditi Reddy   | G00025  | Long-term Education      |    8973633.03 |             452464.04 |        5.0 | 2040-10-27
+ C0118       | Vivaan Gupta  | G00171  | Long-term Home Purchase  |    6330794.34 |             533847.57 |        8.4 | 2043-05-23
+ C0011       | Arjun Nair    | G00017  | Family Emergency Fund    |    9607024.72 |            1009054.36 |       10.5 | 2037-07-31
+ C0120       | Ira Bose      | G00176  | Family Education         |    9940807.67 |            1238266.69 |       12.5 | 2034-08-19
+ C0022       | Karan Menon   | G00035  | Family Travel            |    1074654.89 |             164189.85 |       15.3 | 2039-06-23
+ C0005       | Ishaan Sharma | G00007  | Family Travel            |    6257887.26 |             972693.50 |       15.5 | 2030-08-22
+ C0103       | Riya Kulkarni | G00151  | Family Travel            |    2924248.20 |             481899.06 |       16.5 | 2038-03-23
+ C0093       | Rohan Iyer    | G00135  | Personal Education       |    9602162.77 |            1935329.07 |       20.2 | 2028-11-30
+ C0021       | Rohan Sharma  | G00031  | Long-term Emergency Fund |    1671958.01 |             364925.25 |       21.8 | 2042-01-02
+ C0006       | Naina Menon   | G00009  | Primary Emergency Fund   |    4605302.68 |            1063648.39 |       23.1 | 2036-04-05
+ C0008       | Kabir Singh   | G00013  | Personal Retirement      |    2631380.22 |             610215.15 |       23.2 | 2028-10-13
+(12 rows)
+
+
+=== 6a. Data-quality exceptions recorded by the importer (duplicate IDs, bad references, bad values) ===
+   dataset    |        code        | rows |                 records                  
+--------------+--------------------+------+------------------------------------------
+ transactions | DUPLICATE_ID       |    1 | T0000026
+ transactions | FUTURE_DATE        |    1 | T0004553
+ transactions | NEGATIVE_VALUE     |    1 | T0004552
+ transactions | UNKNOWN_INSTRUMENT |    1 | T0004551
+ holdings     | DUPLICATE_POSITION |    3 | A00147/I0049, A00145/I0036, A00146/I0010
+(5 rows)
+
+
+=== 6b. Reconciliation: accounts with ledger activity but no holdings ===
+ account_id | customer_id | status  | transactions 
+------------+-------------+---------+--------------
+ A00044     | C0032       | DORMANT |           42
+ A00001     | C0001       | CLOSED  |           40
+ A00054     | C0040       | DORMANT |           35
+ A00155     | C0110       | DORMANT |           35
+ A00011     | C0009       | DORMANT |           26
+ A00092     | C0068       | DORMANT |           24
+ A00029     | C0021       | CLOSED  |           23
+ A00063     | C0047       | CLOSED  |           20
+ A00056     | C0042       | CLOSED  |           19
+ A00101     | C0073       | DORMANT |           18
+ A00015     | C0012       | DORMANT |           17
+ A00024     | C0019       | CLOSED  |           12
+(12 rows)
+
+
+=== 6c. Transactions dated before their account was opened (accepted by policy, flagged here for review) ===
+ transactions | accounts | pct_of_ledger 
+--------------+----------+---------------
+         1069 |       71 |          23.5
+(1 row)
+
+
+=== 6d. Customers with no holdings in the current snapshot ===
+ customer_id |    full_name    | accounts 
+-------------+-----------------+----------
+ C0001       | Rohan Sharma    |        1
+ C0009       | Aditi Kapoor    |        1
+ C0019       | Arjun Singh     |        1
+ C0040       | Nikhil Kulkarni |        1
+ C0047       | Aditi Iyer      |        1
+ C0068       | Vivaan Jain     |        1
+ C0110       | Arjun Reddy     |        1
+(7 rows)
+
+
+=== 6e. Reconciliation: do holdings equal the net settled BUY/SELL quantity of the ledger? ===
+ reconciled_positions | total_positions 
+----------------------+-----------------
+                    0 |             982
+(1 row)
+
