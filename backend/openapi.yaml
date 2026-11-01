@@ -1,0 +1,804 @@
+openapi: 3.0.3
+info:
+  title: FinPilot API
+  version: 1.0.0
+  description: |
+    Investment portfolio and goal monitoring for an internal service team. **All data is synthetic.**
+
+    ## Response format (every endpoint)
+
+    Success:
+    ```json
+    { "success": true, "data": <payload>, "meta": { "page": 1, "pageSize": 20, "total": 120, "totalPages": 6 } }
+    ```
+    `meta` appears only on paginated lists. Failure (always the same shape, never a stack trace):
+    ```json
+    { "success": false, "error": { "code": "VALIDATION_ERROR", "message": "Request validation failed",
+      "details": [ { "field": "targetAmount", "message": "Must be greater than 0" } ], "requestId": "b1c2..." } }
+    ```
+    `requestId` is also returned in the `X-Request-Id` header; quote it when reporting a problem.
+
+    | HTTP | `error.code` | Meaning |
+    |---|---|---|
+    | 400 | `VALIDATION_ERROR`, `INVALID_JSON`, `BAD_REQUEST`, `FILE_REQUIRED`, `INVALID_FILE_TYPE`, `EMPTY_FILE`, `NO_DATA_ROWS`, `MISSING_COLUMNS`, `INVALID_CSV`, `INVALID_FILE`, `TOO_MANY_ROWS`, `TOO_MANY_FILES`, `UNEXPECTED_FIELD`, `INVALID_UPLOAD` | The request is malformed or breaks a rule |
+    | 401 | `UNAUTHENTICATED`, `INVALID_CREDENTIALS` | Not signed in / session expired / wrong credentials |
+    | 403 | `FORBIDDEN` | Signed in but not allowed (e.g. VIEWER calling an admin endpoint, or a blocked Origin) |
+    | 404 | `NOT_FOUND` | Unknown route, customer or goal |
+    | 409 | `ALREADY_IMPORTED`, `CONFLICT` | The exact file was already loaded / unique rule violated |
+    | 413 | `PAYLOAD_TOO_LARGE` | JSON over 100 KB or file over 5 MB |
+    | 415 | `UNSUPPORTED_MEDIA_TYPE` | Writes must be JSON (or multipart for the import) |
+    | 429 | `RATE_LIMITED` | Too many requests (see `Retry-After`) |
+    | 500 | `INTERNAL_ERROR` | Unexpected failure (details only in server logs) |
+    | 503 | `SERVICE_UNAVAILABLE` | The database is unreachable or too slow |
+
+    ## Conventions
+    * Money and quantities are **exact decimals sent as strings** (`"1523400.55"`), never floats. Dates are `YYYY-MM-DD`.
+    * Authentication is a signed **httpOnly cookie** (`finpilot_token`) set by `POST /auth/login`. In Swagger UI, call
+      login first; the browser then sends the cookie automatically. With curl use `-c jar.txt` / `-b jar.txt`.
+    * Writes from a browser must come from an allowed `Origin` (CSRF defence).
+    * Roles: `VIEWER` (everything except imports) and `ADMIN` (also CSV imports).
+servers:
+  - url: http://localhost:8000/api/v1
+    description: API directly (npm run dev, or the api container)
+  - url: http://localhost:3000/api/v1
+    description: Through the web container's nginx proxy
+security:
+  - cookieAuth: []
+tags:
+  - name: Auth
+  - name: Customers
+  - name: Goals
+  - name: Reference
+  - name: Admin
+  - name: Operations
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in
+      description: Verifies the credentials and sets the `finpilot_token` cookie (httpOnly, SameSite=Lax, 8 hours). Throttled to 10 attempts per 15 minutes per IP. The demo users come from the `SEED_VIEWER_*` and `SEED_ADMIN_*` lines of your `.env`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: your-demo-email@example.test, password: your-demo-password }
+      responses:
+        '200':
+          description: Signed in
+          headers:
+            Set-Cookie:
+              schema: { type: string, example: 'finpilot_token=eyJ...; Path=/; Max-Age=28800; HttpOnly; SameSite=Lax' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Sign out
+      description: Clears the session cookie. Safe to call when not signed in.
+      security: []
+      responses:
+        '200':
+          description: Signed out
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogoutResponse' }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Who am I?
+      description: Returns the signed-in user (used by the web app to restore the session after a page refresh).
+      responses:
+        '200':
+          description: The current user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /customers:
+    get:
+      tags: [Customers]
+      summary: Search and list customers
+      description: '`q` matches the customer ID, name, email or city (case-insensitive "contains"; `%` and `_` are literal). Ordered by name.'
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+          example: sharma
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: One page of customers
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerListResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /customers/{customerId}:
+    get:
+      tags: [Customers]
+      summary: Customer profile
+      description: Core details, KYC status, segment, the latest risk profile (`null` if none) and the customer's accounts (`[]` if none).
+      parameters: [{ $ref: '#/components/parameters/CustomerId' }]
+      responses:
+        '200':
+          description: The profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerProfileResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /customers/{customerId}/portfolio:
+    get:
+      tags: [Customers]
+      summary: Portfolio dashboard data
+      description: |
+        Customer-level totals, per-account totals, allocation by asset class and every position, all computed in PostgreSQL
+        from the **current holdings snapshot** and the latest instrument prices. `asOf` tells the user how fresh the data is
+        (`priceDate` is the oldest price date among the positions). A customer without holdings gets zeros and empty lists.
+        Figures reconcile exactly: market value - cost = unrealised P&L on every row and in every total.
+      parameters: [{ $ref: '#/components/parameters/CustomerId' }]
+      responses:
+        '200':
+          description: The portfolio
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortfolioResponse' }
+              example:
+                success: true
+                data:
+                  customerId: C0002
+                  asOf: { snapshotDate: '2026-09-18', priceDate: '2026-09-18' }
+                  totals: { marketValue: '263088.49', costValue: '235759.39', unrealisedPnl: '27329.10', unrealisedPnlPct: '11.59', positionCount: 8 }
+                  accounts:
+                    - { accountId: A00002, accountType: BROKERAGE, provider: NorthStar Securities, status: ACTIVE, openedAt: '2024-12-27', marketValue: '263088.49', costValue: '235759.39', unrealisedPnl: '27329.10', positionCount: 8 }
+                  allocation:
+                    - { assetClass: EQUITY, marketValue: '201193.28', weightPct: '76.47' }
+                    - { assetClass: MUTUAL_FUND, marketValue: '57550.81', weightPct: '21.88' }
+                    - { assetClass: BOND, marketValue: '4344.40', weightPct: '1.65' }
+                  positions:
+                    - { accountId: A00002, instrumentId: I0014, symbol: EQ014, instrumentName: FinPilot Equity 14, assetClass: EQUITY, quantity: '40.6140', avgCost: '2396.36', lastPrice: '2341.67', marketValue: '95104.59', costValue: '97325.77', unrealisedPnl: '-2221.18', unrealisedPnlPct: '-2.28' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /customers/{customerId}/transactions:
+    get:
+      tags: [Customers]
+      summary: Transactions (server-side filter, sort, pagination)
+      description: |
+        Filtering, sorting and paging happen in the database. Date bounds are inclusive. Filters that match nothing (including an
+        account that belongs to another customer) return an empty page, not an error. `PENDING` and `REVERSED` rows are included
+        and identified by `status`. Page boundaries are stable (ties are broken by transaction ID).
+      parameters:
+        - $ref: '#/components/parameters/CustomerId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - { name: from, in: query, description: 'Earliest trade date (inclusive)', schema: { type: string, format: date } }
+        - { name: to, in: query, description: 'Latest trade date (inclusive); must not be before `from`', schema: { type: string, format: date } }
+        - { name: accountId, in: query, schema: { type: string, example: A00002 } }
+        - { name: instrumentId, in: query, schema: { type: string, example: I0046 } }
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/TransactionType' } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/TransactionStatus' } }
+        - { name: sortBy, in: query, schema: { type: string, enum: [tradeDate, amount], default: tradeDate } }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+      responses:
+        '200':
+          description: One page of transactions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionListResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /customers/{customerId}/goals:
+    get:
+      tags: [Goals]
+      summary: List a customer's goals
+      description: |
+        Highest priority first, then soonest target date. Each goal carries `fundedPct` and `flags`:
+        `OVERDUE` (date passed, not fully funded), `OVER_FUNDED` (funded above target; logically inconsistent) and `COMPLETED` (funded = target).
+      parameters: [{ $ref: '#/components/parameters/CustomerId' }]
+      responses:
+        '200':
+          description: The goals (possibly empty)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GoalListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Goals]
+      summary: Create a goal
+      description: Amounts may be numbers or numeric strings with at most 2 decimals. The funded amount defaults to 0 and may not exceed the target; the target date must be after today (and no later than 2100-12-31).
+      parameters: [{ $ref: '#/components/parameters/CustomerId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateGoalRequest' }
+            example: { goalType: EDUCATION, goalName: College fund, targetAmount: 500000, currentFundedAmount: 25000, targetDate: '2035-06-01', priority: HIGH }
+      responses:
+        '201':
+          description: Created. The `Location` header points at the new goal.
+          headers:
+            Location: { schema: { type: string, example: /api/v1/goals/G00178 } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GoalResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /goals/{goalId}:
+    patch:
+      tags: [Goals]
+      summary: Edit a goal
+      description: |
+        Send only the fields to change (at least one). "Funded must not exceed target" is checked against the **resulting** values
+        whenever either amount is part of the request (concurrent edits are serialised with a row lock). A goal that is already
+        overdue or over-funded can still be renamed or re-prioritised.
+      parameters:
+        - { name: goalId, in: path, required: true, schema: { type: string, example: G00001 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchGoalRequest' }
+            example: { currentFundedAmount: '30000.50', priority: MEDIUM }
+      responses:
+        '200':
+          description: The updated goal
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GoalResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+
+  /instruments:
+    get:
+      tags: [Reference]
+      summary: List instruments (for filter dropdowns)
+      responses:
+        '200':
+          description: All instruments, ordered by symbol
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InstrumentListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/imports/transactions:
+    post:
+      tags: [Admin]
+      summary: Import a transactions CSV (ADMIN only)
+      description: |
+        Upload a CSV (multipart field `file`, UTF-8, max 5 MB / 50,000 rows). Header: `transaction_id, account_id, instrument_id,
+        transaction_type, trade_date, quantity, price, amount, status` (case/spacing-insensitive, extra columns ignored).
+
+        Every row is validated; a bad row is **rejected with a reason, never silently fixed**, and the good rows are still loaded.
+        Everything is saved in **one database transaction** (all or nothing) and rejected rows are stored in `import_rejections`.
+        Existing transactions are never overwritten. Uploading a file whose content was already loaded returns **409**
+        (a file that loaded nothing may be retried). Only one import per dataset runs at a time.
+
+        Row `code`s: `MISSING_VALUE`, `INVALID_ID`, `INVALID_ENUM`, `INVALID_DATE`, `FUTURE_DATE`, `INVALID_NUMBER`, `NEGATIVE_VALUE`,
+        `INVALID_TRADE_VALUES`, `UNKNOWN_ACCOUNT`, `UNKNOWN_INSTRUMENT`, `DUPLICATE_ID`. `rowNumber` is the spreadsheet row (header = 1).
+        At most 1,000 rejections are returned (`truncated: true` if there were more); all are stored.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary, description: 'A .csv file' }
+      responses:
+        '201':
+          description: The file was processed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResponse' }
+              example:
+                success: true
+                data:
+                  batchId: 3
+                  fileName: transactions_demo_upload.csv
+                  totalRows: 11
+                  importedRows: 3
+                  rejectedRows: 8
+                  truncated: false
+                  rejections:
+                    - { rowNumber: 5, recordKey: T9000004, code: UNKNOWN_INSTRUMENT, detail: 'instrument_id = I9999 does not exist' }
+                    - { rowNumber: 8, recordKey: T9000007, code: NEGATIVE_VALUE, detail: 'amount = -25.00 — must not be negative' }
+                    - { rowNumber: 10, recordKey: T0000001, code: DUPLICATE_ID, detail: 'transaction_id = T0000001 already exists (existing data is never overwritten)' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: This exact file was already imported
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example:
+                success: false
+                error: { code: ALREADY_IMPORTED, message: 'This exact file was already imported as batch #2', details: { batchId: 2, importedAt: '2026-10-31T17:23:34.5Z' }, requestId: 4e0c3f3e-6a0f-4a52-9d57-9f5a7b1c2d3e }
+        '413':
+          description: The file is larger than 5 MB
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /health:
+    get:
+      tags: [Operations]
+      summary: Liveness and readiness
+      description: 200 when the API can reach PostgreSQL, otherwise 503 in the standard error envelope. Exposes no secrets. Used by Docker health checks.
+      security: []
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+              example:
+                success: true
+                data: { status: ok, version: 1.0.0, uptimeSeconds: 1234, checks: { database: { status: up, latencyMs: 2 } } }
+        '503':
+          description: The database is not reachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example:
+                success: false
+                error: { code: SERVICE_UNAVAILABLE, message: The API is running but the database is not reachable, details: { checks: { database: { status: down } } }, requestId: 4e0c3f3e-6a0f-4a52-9d57-9f5a7b1c2d3e }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: finpilot_token
+      description: Set by POST /auth/login (httpOnly cookie).
+
+  parameters:
+    CustomerId:
+      name: customerId
+      in: path
+      required: true
+      schema: { type: string, example: C0002 }
+    Page:
+      name: page
+      in: query
+      description: 1-based page number (1 to 1,000,000). A page past the end returns an empty list, not an error.
+      schema: { type: integer, minimum: 1, maximum: 1000000, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    ValidationError:
+      description: The request is malformed or breaks a rule. `error.details` lists the offending fields.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            success: false
+            error:
+              code: VALIDATION_ERROR
+              message: Request validation failed
+              details: [ { field: targetAmount, message: Must be greater than 0 }, { field: targetDate, message: 'Must be after 2026-10-31' } ]
+              requestId: 4e0c3f3e-6a0f-4a52-9d57-9f5a7b1c2d3e
+    Unauthorized:
+      description: Not signed in, session expired, or wrong credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { success: false, error: { code: UNAUTHENTICATED, message: Sign in to continue, requestId: 4e0c3f3e-6a0f-4a52-9d57-9f5a7b1c2d3e } }
+    Forbidden:
+      description: Signed in, but not allowed to do this
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: The customer or goal does not exist
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { success: false, error: { code: NOT_FOUND, message: Customer C9999 not found, requestId: 4e0c3f3e-6a0f-4a52-9d57-9f5a7b1c2d3e } }
+    UnsupportedMediaType:
+      description: Send JSON with `Content-Type MIME application/json`
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: Too many attempts. Wait for the number of seconds in `Retry-After`.
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    # ---------- envelopes ----------
+    Success:
+      type: object
+      required: [success]
+      properties:
+        success: { type: boolean, enum: [true] }
+    PageMeta:
+      type: object
+      required: [page, pageSize, total, totalPages]
+      properties:
+        page: { type: integer, example: 1 }
+        pageSize: { type: integer, example: 20 }
+        total: { type: integer, description: Rows matching the filters across all pages, example: 120 }
+        totalPages: { type: integer, description: '0 when nothing matches', example: 6 }
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field: { type: string, example: targetAmount }
+        message: { type: string, example: Must be greater than 0 }
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details:
+              description: 'For VALIDATION_ERROR an array of FieldError; for some other errors an object with extra context (e.g. the earlier batch of a 409).'
+              oneOf:
+                - type: array
+                  items: { $ref: '#/components/schemas/FieldError' }
+                - type: object
+            requestId: { type: string }
+
+    # ---------- enums ----------
+    Money:
+      type: string
+      pattern: '^-?\d+(\.\d+)?$'
+      description: Exact decimal as a string
+      example: '1523400.55'
+    Role: { type: string, enum: [VIEWER, ADMIN] }
+    KycStatus: { type: string, enum: [VERIFIED, PENDING, REVIEW] }
+    Segment: { type: string, enum: [Mass, Affluent, HNI] }
+    AccountType: { type: string, enum: [BROKERAGE, MUTUAL_FUND, RETIREMENT] }
+    AccountStatus: { type: string, enum: [ACTIVE, DORMANT, CLOSED] }
+    AssetClass: { type: string, enum: [EQUITY, ETF, MUTUAL_FUND, BOND, REIT, GSEC] }
+    RiskLevel: { type: string, enum: [Conservative, Moderate, Growth, Aggressive] }
+    Priority: { type: string, enum: [LOW, MEDIUM, HIGH] }
+    GoalType: { type: string, enum: [RETIREMENT, EDUCATION, HOME_PURCHASE, EMERGENCY_FUND, TRAVEL, WEALTH_CREATION] }
+    TransactionType: { type: string, enum: [BUY, SELL, DIVIDEND, FEE] }
+    TransactionStatus: { type: string, enum: [SETTLED, PENDING, REVERSED] }
+    GoalFlag:
+      type: string
+      enum: [OVERDUE, OVER_FUNDED, COMPLETED]
+
+    # ---------- auth ----------
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, description: Case-insensitive }
+        password: { type: string, maxLength: 72, description: 'At most 72 bytes' }
+    User:
+      type: object
+      required: [id, email, fullName, role]
+      properties:
+        id: { type: integer }
+        email: { type: string }
+        fullName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+    UserResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [user]
+              properties:
+                user: { $ref: '#/components/schemas/User' }
+    LogoutResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              properties:
+                loggedOut: { type: boolean, enum: [true] }
+
+    # ---------- customers ----------
+    CustomerSummary:
+      type: object
+      required: [customerId, fullName, email, phone, city, state, kycStatus, segment]
+      properties:
+        customerId: { type: string, example: C0002 }
+        fullName: { type: string, example: Kabir Singh }
+        email: { type: string }
+        phone: { type: string }
+        city: { type: string }
+        state: { type: string, example: DL }
+        kycStatus: { $ref: '#/components/schemas/KycStatus' }
+        segment: { $ref: '#/components/schemas/Segment' }
+    CustomerListResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data, meta]
+          properties:
+            data: { type: array, items: { $ref: '#/components/schemas/CustomerSummary' } }
+            meta: { $ref: '#/components/schemas/PageMeta' }
+    RiskProfile:
+      type: object
+      required: [riskScore, riskLevel, assessedAt, horizonYears, liquidityNeed]
+      properties:
+        riskScore: { type: integer, minimum: 0, maximum: 100 }
+        riskLevel: { $ref: '#/components/schemas/RiskLevel' }
+        assessedAt: { type: string, format: date }
+        horizonYears: { type: integer }
+        liquidityNeed: { $ref: '#/components/schemas/Priority' }
+    AccountInfo:
+      type: object
+      required: [accountId, accountType, provider, status, openedAt, baseCurrency]
+      properties:
+        accountId: { type: string }
+        accountType: { $ref: '#/components/schemas/AccountType' }
+        provider: { type: string }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        openedAt: { type: string, format: date }
+        baseCurrency: { type: string, example: INR }
+    CustomerProfile:
+      allOf:
+        - $ref: '#/components/schemas/CustomerSummary'
+        - type: object
+          required: [dateOfBirth, onboardedAt, riskProfile, accounts]
+          properties:
+            dateOfBirth: { type: string, format: date }
+            onboardedAt: { type: string, format: date }
+            riskProfile:
+              nullable: true
+              allOf: [ { $ref: '#/components/schemas/RiskProfile' } ]
+            accounts: { type: array, items: { $ref: '#/components/schemas/AccountInfo' } }
+    CustomerProfileResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data: { $ref: '#/components/schemas/CustomerProfile' }
+
+    # ---------- portfolio ----------
+    PortfolioTotals:
+      type: object
+      required: [marketValue, costValue, unrealisedPnl, unrealisedPnlPct, positionCount]
+      properties:
+        marketValue: { $ref: '#/components/schemas/Money' }
+        costValue: { $ref: '#/components/schemas/Money' }
+        unrealisedPnl: { $ref: '#/components/schemas/Money' }
+        unrealisedPnlPct: { type: string, nullable: true, description: 'null when cost is 0', example: '11.59' }
+        positionCount: { type: integer }
+    PortfolioAccount:
+      type: object
+      properties:
+        accountId: { type: string }
+        accountType: { $ref: '#/components/schemas/AccountType' }
+        provider: { type: string }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        openedAt: { type: string, format: date }
+        marketValue: { $ref: '#/components/schemas/Money' }
+        costValue: { $ref: '#/components/schemas/Money' }
+        unrealisedPnl: { $ref: '#/components/schemas/Money' }
+        positionCount: { type: integer }
+    AllocationSlice:
+      type: object
+      properties:
+        assetClass: { $ref: '#/components/schemas/AssetClass' }
+        marketValue: { $ref: '#/components/schemas/Money' }
+        weightPct: { type: string, description: Share of the customer's total market value, example: '76.47' }
+    Position:
+      type: object
+      properties:
+        accountId: { type: string }
+        instrumentId: { type: string }
+        symbol: { type: string }
+        instrumentName: { type: string }
+        assetClass: { $ref: '#/components/schemas/AssetClass' }
+        quantity: { $ref: '#/components/schemas/Money' }
+        avgCost: { $ref: '#/components/schemas/Money' }
+        lastPrice: { $ref: '#/components/schemas/Money' }
+        marketValue: { $ref: '#/components/schemas/Money' }
+        costValue: { $ref: '#/components/schemas/Money' }
+        unrealisedPnl: { $ref: '#/components/schemas/Money' }
+        unrealisedPnlPct: { type: string, nullable: true }
+    Portfolio:
+      type: object
+      required: [customerId, asOf, totals, accounts, allocation, positions]
+      properties:
+        customerId: { type: string }
+        asOf:
+          type: object
+          description: Data freshness. Both are null when the customer has no holdings.
+          properties:
+            snapshotDate: { type: string, format: date, nullable: true }
+            priceDate: { type: string, format: date, nullable: true }
+        totals: { $ref: '#/components/schemas/PortfolioTotals' }
+        accounts: { type: array, items: { $ref: '#/components/schemas/PortfolioAccount' } }
+        allocation: { type: array, items: { $ref: '#/components/schemas/AllocationSlice' } }
+        positions: { type: array, items: { $ref: '#/components/schemas/Position' } }
+    PortfolioResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data: { $ref: '#/components/schemas/Portfolio' }
+
+    # ---------- transactions ----------
+    Transaction:
+      type: object
+      required: [transactionId, accountId, instrumentId, symbol, instrumentName, transactionType, tradeDate, quantity, price, amount, status]
+      properties:
+        transactionId: { type: string, example: T0000001 }
+        accountId: { type: string }
+        instrumentId: { type: string }
+        symbol: { type: string }
+        instrumentName: { type: string }
+        transactionType: { $ref: '#/components/schemas/TransactionType' }
+        tradeDate: { type: string, format: date }
+        quantity: { $ref: '#/components/schemas/Money' }
+        price: { $ref: '#/components/schemas/Money' }
+        amount: { $ref: '#/components/schemas/Money' }
+        status: { $ref: '#/components/schemas/TransactionStatus' }
+    TransactionListResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data, meta]
+          properties:
+            data: { type: array, items: { $ref: '#/components/schemas/Transaction' } }
+            meta: { $ref: '#/components/schemas/PageMeta' }
+
+    # ---------- goals ----------
+    Goal:
+      type: object
+      required: [goalId, customerId, goalType, goalName, targetAmount, currentFundedAmount, targetDate, priority, fundedPct, flags]
+      properties:
+        goalId: { type: string, example: G00001 }
+        customerId: { type: string }
+        goalType: { $ref: '#/components/schemas/GoalType' }
+        goalName: { type: string }
+        targetAmount: { $ref: '#/components/schemas/Money' }
+        currentFundedAmount: { $ref: '#/components/schemas/Money' }
+        targetDate: { type: string, format: date }
+        priority: { $ref: '#/components/schemas/Priority' }
+        fundedPct: { type: number, description: 'currentFundedAmount / targetAmount x 100, one decimal', example: 82.3 }
+        flags: { type: array, items: { $ref: '#/components/schemas/GoalFlag' } }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    GoalResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data: { $ref: '#/components/schemas/Goal' }
+    GoalListResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data: { type: array, items: { $ref: '#/components/schemas/Goal' } }
+    AmountInput:
+      description: A number or numeric string, at most 2 decimals, up to 12 integer digits
+      oneOf:
+        - type: number
+        - type: string
+          pattern: '^\d{1,12}(\.\d{1,2})?$'
+    CreateGoalRequest:
+      type: object
+      additionalProperties: false
+      required: [goalType, goalName, targetAmount, targetDate, priority]
+      properties:
+        goalType: { $ref: '#/components/schemas/GoalType' }
+        goalName: { type: string, minLength: 1, maxLength: 120 }
+        targetAmount: { allOf: [ { $ref: '#/components/schemas/AmountInput' } ], description: Must be greater than 0 }
+        currentFundedAmount: { allOf: [ { $ref: '#/components/schemas/AmountInput' } ], description: 'Default 0; must not exceed targetAmount' }
+        targetDate: { type: string, format: date, description: 'After today, on or before 2100-12-31' }
+        priority: { $ref: '#/components/schemas/Priority' }
+    PatchGoalRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        goalType: { $ref: '#/components/schemas/GoalType' }
+        goalName: { type: string, minLength: 1, maxLength: 120 }
+        targetAmount: { $ref: '#/components/schemas/AmountInput' }
+        currentFundedAmount: { $ref: '#/components/schemas/AmountInput' }
+        targetDate: { type: string, format: date }
+        priority: { $ref: '#/components/schemas/Priority' }
+
+    # ---------- reference ----------
+    Instrument:
+      type: object
+      properties:
+        instrumentId: { type: string, example: I0046 }
+        symbol: { type: string, example: EQ046 }
+        instrumentName: { type: string }
+        assetClass: { $ref: '#/components/schemas/AssetClass' }
+    InstrumentListResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data: { type: array, items: { $ref: '#/components/schemas/Instrument' } }
+
+    # ---------- import ----------
+    Rejection:
+      type: object
+      required: [rowNumber, recordKey, code, detail]
+      properties:
+        rowNumber: { type: integer, description: 'Spreadsheet row; the header is row 1', example: 5 }
+        recordKey: { type: string, nullable: true, description: The transaction ID, when the row had one, example: T9000004 }
+        code: { type: string, example: UNKNOWN_INSTRUMENT }
+        detail: { type: string, example: 'instrument_id = I9999 does not exist' }
+    ImportResult:
+      type: object
+      required: [batchId, fileName, totalRows, importedRows, rejectedRows, truncated, rejections]
+      properties:
+        batchId: { type: integer }
+        fileName: { type: string }
+        totalRows: { type: integer }
+        importedRows: { type: integer }
+        rejectedRows: { type: integer }
+        truncated: { type: boolean, description: 'true when more than 1,000 rows were rejected (all are stored)' }
+        rejections: { type: array, items: { $ref: '#/components/schemas/Rejection' } }
+    ImportResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data: { $ref: '#/components/schemas/ImportResult' }
+
+    # ---------- health ----------
+    HealthResponse:
+      allOf:
+        - $ref: '#/components/schemas/Success'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              properties:
+                status: { type: string, enum: [ok] }
+                version: { type: string }
+                uptimeSeconds: { type: integer }
+                checks:
+                  type: object
+                  properties:
+                    database:
+                      type: object
+                      properties:
+                        status: { type: string, enum: [up] }
+                        latencyMs: { type: integer }
