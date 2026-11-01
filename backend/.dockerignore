@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+tests
+.env
+.env.*
+*.log
+vitest.config.mts
+eslint.config.mjs
+drizzle.config.ts
