@@ -1,0 +1,105 @@
+name: CI
+
+# Runs on every push and pull request. Any failing step (lint, types, tests, build, audit, smoke test) fails the run.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint, types, tests, build)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: finpilot
+          POSTGRES_DB: finpilot
+          # A throwaway container that only exists during this run and is reachable only from the runner,
+          # so it needs no password. This keeps every credential out of the repository.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U finpilot -d finpilot"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      # The tests create and use their own database (finpilot_test) on this server.
+      DATABASE_URL: postgres://finpilot@localhost:5432/finpilot
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Generate throwaway test credentials (random on every run, never stored anywhere)
+        working-directory: .
+        run: |
+          {
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "SEED_ADMIN_EMAIL=admin@ci.test"
+            echo "SEED_ADMIN_PASSWORD=$(openssl rand -hex 16)"
+            echo "SEED_VIEWER_EMAIL=viewer@ci.test"
+            echo "SEED_VIEWER_PASSWORD=$(openssl rand -hex 16)"
+          } >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test # migrates and seeds a fresh test database, then runs unit + API + database tests
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high # known-vulnerability scan of what actually ships
+
+  frontend:
+    name: Frontend (lint, types, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
+  compose-smoke:
+    name: Local deployment (docker compose up + smoke test)
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (the committed example is enough for CI)
+        run: cp .env.example .env
+      - name: Build and start db + api + web, wait until healthy
+        run: docker compose up -d --build --wait --wait-timeout 240
+      - name: Smoke test through the web container (nginx -> API -> PostgreSQL)
+        run: |
+          set -euo pipefail
+          set -a; . ./.env; set +a   # the demo login comes from .env, not from this file
+          curl -fsS http://localhost:3000/api/v1/health
+          curl -fsS -c jar.txt -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$SEED_VIEWER_EMAIL\",\"password\":\"$SEED_VIEWER_PASSWORD\"}" http://localhost:3000/api/v1/auth/login
+          curl -fsS -b jar.txt http://localhost:3000/api/v1/customers/C0002/portfolio | grep -q '"marketValue":"263088.49"'
+          curl -fsS http://localhost:3000/ | grep -q '<div id="root">'
+          curl -fsS http://localhost:8000/api/v1/docs/ | grep -qi swagger
+          echo "smoke test passed"
+      - name: Container logs (only on failure)
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
